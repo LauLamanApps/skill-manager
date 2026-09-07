@@ -35,10 +35,10 @@ jobs:
           APP_BUILD: ${{ github.run_number }}
         run: ./scripts/build-app.sh
 
-      - name: Zip app bundle
+      - name: Build DMG
         run: |
-          ditto -c -k --keepParent build/SkillManager.app \
-            "SkillManager-${{ steps.version.outputs.version }}.zip"
+          chmod +x scripts/make-dmg.sh
+          ./scripts/make-dmg.sh "SkillManager-${{ steps.version.outputs.version }}.dmg"
 
       - name: Upload release asset
         if: github.event_name == 'release'
@@ -46,11 +46,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${{ github.event.release.tag_name }}" \
-            "SkillManager-${{ steps.version.outputs.version }}.zip" --clobber
+            "SkillManager-${{ steps.version.outputs.version }}.dmg" --clobber
 
       - name: Upload workflow artifact
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: SkillManager-${{ steps.version.outputs.version }}
-          path: SkillManager-${{ steps.version.outputs.version }}.zip
+          path: SkillManager-${{ steps.version.outputs.version }}.dmg
