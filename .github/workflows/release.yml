@@ -1,0 +1,56 @@
+name: Release build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp into the app bundle (e.g. 1.2.3)"
+        required: true
+        default: "0.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            RAW="${{ github.event.release.tag_name }}"
+          else
+            RAW="${{ inputs.version }}"
+          fi
+          echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build app
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          APP_BUILD: ${{ github.run_number }}
+        run: ./scripts/build-app.sh
+
+      - name: Zip app bundle
+        run: |
+          ditto -c -k --keepParent build/SkillManager.app \
+            "SkillManager-${{ steps.version.outputs.version }}.zip"
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "SkillManager-${{ steps.version.outputs.version }}.zip" --clobber
+
+      - name: Upload workflow artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkillManager-${{ steps.version.outputs.version }}
+          path: SkillManager-${{ steps.version.outputs.version }}.zip

@@ -1,0 +1,12 @@
+# SwiftPM
+.build/
+.swiftpm/
+
+# App bundle output (scripts/build-app.sh)
+build/
+
+# macOS
+.DS_Store
+
+# Per-developer Claude Code settings (absolute-path hooks)
+.claude/settings.local.json
