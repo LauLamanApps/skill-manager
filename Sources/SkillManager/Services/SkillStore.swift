@@ -8,6 +8,8 @@ final class SkillStore: ObservableObject {
     @Published var lastError: String?
     @Published var isSyncing = false
     @Published var lastSyncedCommit: String?
+    /// Non-nil while a Sync sits on an unresolved rebase conflict.
+    @Published var syncConflict: SyncConflict?
 
     @AppStorage("catalogRepoURL") var catalogRepoURL: String = ""
 
@@ -86,7 +88,9 @@ final class SkillStore: ObservableObject {
                     tags: meta.tags,
                     folder: folder,
                     path: entry,
-                    source: source
+                    source: source,
+                    issues: SkillHealth.check(content: content),
+                    bodyText: Frontmatter.split(content).body
                 ))
             } else {
                 scanTree(
@@ -126,18 +130,22 @@ final class SkillStore: ObservableObject {
 
     func install(_ skill: Skill) {
         do {
-            let fm = FileManager.default
-            try fm.createDirectory(at: Self.installedDir, withIntermediateDirectories: true)
-            let dest = Self.installedDir.appendingPathComponent(skill.path.lastPathComponent)
-            if fm.fileExists(atPath: dest.path) {
-                try fm.removeItem(at: dest)
-            }
-            try fm.copyItem(at: skill.path, to: dest)
-            pruneIgnored(at: dest)
+            try performInstall(skill)
             refresh()
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    private func performInstall(_ skill: Skill) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: Self.installedDir, withIntermediateDirectories: true)
+        let dest = Self.installedDir.appendingPathComponent(skill.path.lastPathComponent)
+        if fm.fileExists(atPath: dest.path) {
+            try fm.removeItem(at: dest)
+        }
+        try fm.copyItem(at: skill.path, to: dest)
+        pruneIgnored(at: dest)
     }
 
     /// Removes gitignored junk (e.g. __pycache__) from a freshly copied skill.
@@ -166,14 +174,18 @@ final class SkillStore: ObservableObject {
     /// frontmatter block, so an open editor's unsaved body edits stay intact.
     func setTags(_ skill: Skill, tags: [String]) {
         do {
-            let raw = try String(contentsOf: skill.skillFile, encoding: .utf8)
-            let updated = Frontmatter.settingTags(in: raw, tags: tags)
-            if updated != raw {
-                try updated.write(to: skill.skillFile, atomically: true, encoding: .utf8)
-            }
+            try performSetTags(skill, tags: tags)
             refresh()
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    private func performSetTags(_ skill: Skill, tags: [String]) throws {
+        let raw = try String(contentsOf: skill.skillFile, encoding: .utf8)
+        let updated = Frontmatter.settingTags(in: raw, tags: tags)
+        if updated != raw {
+            try updated.write(to: skill.skillFile, atomically: true, encoding: .utf8)
         }
     }
 
@@ -214,10 +226,69 @@ final class SkillStore: ObservableObject {
 
     func uninstall(_ skill: Skill) {
         do {
-            try FileManager.default.removeItem(at: skill.path)
+            var trashURL: NSURL?
+            try FileManager.default.trashItem(at: skill.path, resultingItemURL: &trashURL)
             refresh()
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    // MARK: - Trials
+
+    /// Opens a Terminal running Claude Code with `skill` loaded ad hoc, so it
+    /// can be exercised before committing to an install. See `SkillTrial`.
+    func tryIt(_ skill: Skill, model: String? = nil) async {
+        do {
+            try await SkillTrial.start(skill, model: model)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    // MARK: - Bulk operations
+
+    /// Installs several catalog skills in one go: same per-skill work as
+    /// `install(_:)`, but a single `refresh()` at the end instead of one per
+    /// item. A failing skill doesn't abort the rest — every error is collected
+    /// and reported together.
+    func install(_ skills: [Skill]) {
+        runBatch(skills) { try performInstall($0) }
+    }
+
+    func uninstall(_ skills: [Skill]) {
+        runBatch(skills) { skill in
+            var trashURL: NSURL?
+            try FileManager.default.trashItem(at: skill.path, resultingItemURL: &trashURL)
+        }
+    }
+
+    /// Appends `tag` to every skill that doesn't carry it yet; skills that
+    /// already have it are left untouched.
+    func addTag(_ tag: String, to skills: [Skill]) {
+        let clean = tag.trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty else { return }
+        runBatch(skills) { skill in
+            guard !skill.tags.contains(where: { $0.caseInsensitiveCompare(clean) == .orderedSame })
+            else { return }
+            try performSetTags(skill, tags: skill.tags + [clean])
+        }
+    }
+
+    /// Runs `body` for each skill, keeping going after a failure, then refreshes
+    /// once. Failures surface as a single error listing the skills that broke.
+    private func runBatch(_ skills: [Skill], _ body: (Skill) throws -> Void) {
+        var failures: [String] = []
+        for skill in skills {
+            do {
+                try body(skill)
+            } catch {
+                failures.append("\(skill.name): \(error.localizedDescription)")
+            }
+        }
+        refresh()
+        if !failures.isEmpty {
+            lastError = failures.joined(separator: "\n")
         }
     }
 
@@ -241,6 +312,38 @@ final class SkillStore: ObservableObject {
             }
             refresh()
         } catch {
+            report(error)
+        }
+    }
+
+    /// Applies the user's per-file choices to the stopped rebase and finishes
+    /// the sync. Another conflicting commit further along the rebase re-opens
+    /// the sheet with the new files instead of erroring out.
+    func resolveSyncConflict(_ choices: [String: ConflictResolution]) async {
+        isSyncing = true
+        defer { isSyncing = false }
+        syncConflict = nil
+        do {
+            try await git.resolveConflicts(choices)
+            try await git.push()
+            refresh()
+        } catch {
+            report(error)
+        }
+    }
+
+    /// Drops the rebase — the catalog goes back to its pre-sync state.
+    func cancelSyncConflict() async {
+        syncConflict = nil
+        await git.abortRebase()
+        refresh()
+    }
+
+    /// A conflict opens the resolution sheet; everything else is a plain error.
+    private func report(_ error: Error) {
+        if case GitError.conflict(let files) = error, !files.isEmpty {
+            syncConflict = SyncConflict(files: files)
+        } else {
             lastError = error.localizedDescription
         }
     }
@@ -256,4 +359,10 @@ final class SkillStore: ObservableObject {
             lastError = error.localizedDescription
         }
     }
+}
+
+/// The files a Sync stopped on, as one presentable unit for `sheet(item:)`.
+struct SyncConflict: Identifiable {
+    let id = UUID()
+    let files: [String]
 }
