@@ -2,6 +2,8 @@ import SwiftUI
 
 struct SkillDetailView: View {
     @EnvironmentObject var store: SkillStore
+    @EnvironmentObject var chatSessions: ChatSessionStore
+    @AppStorage("claudeModel") private var claudeModel: String = ""
     let skill: Skill
 
     @State private var content: String = ""
@@ -14,12 +16,13 @@ struct SkillDetailView: View {
     @State private var isBinaryFile = false
     @State private var editorLanguage: CodeLanguage = .markdown
     @State private var showInspector = true
-    @StateObject private var chatRunner = ClaudeRunner()
-    @State private var chatInput = ""
     @State private var showAISheet = false
     @State private var showAddToCatalogSheet = false
 
     private var isDirty: Bool { content != savedContent }
+
+    /// Outlives this view, so the conversation survives switching skills.
+    private var chatRunner: ClaudeRunner { chatSessions.runner(for: .detail(skill.id)) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,13 +38,12 @@ struct SkillDetailView: View {
                 CodeEditorView(text: $content, language: editorLanguage)
             }
             Divider()
-            chatPanel
-        }
-        .onChange(of: chatRunner.finishedSuccessfully) { _, success in
-            if success == true {
-                store.refresh()
-                load()
-            }
+            SkillChatPanel(
+                runner: chatRunner,
+                skill: skill,
+                isDirty: isDirty,
+                onFilesChanged: reloadFromDisk
+            )
         }
         .inspector(isPresented: $showInspector) {
             SkillInspectorView(
@@ -49,7 +51,8 @@ struct SkillDetailView: View {
                 files: files,
                 isDirty: isDirty,
                 selectedFile: $selectedFile,
-                onSelectFile: loadFile
+                onSelectFile: loadFile,
+                showInspector: $showInspector
             )
             .inspectorColumnWidth(min: 200, ideal: 240, max: 340)
         }
@@ -67,7 +70,8 @@ struct SkillDetailView: View {
                 .help("Ask Claude Code to modify this skill")
 
                 actionButton
-
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     showInspector.toggle()
                 } label: {
@@ -77,7 +81,7 @@ struct SkillDetailView: View {
             }
         }
         .sheet(isPresented: $showAISheet) {
-            AISkillSheet(mode: .edit(skill))
+            AISkillSheet(runner: chatSessions.runner(for: .edit(skill.id)), mode: .edit(skill))
         }
         .sheet(isPresented: $showAddToCatalogSheet) {
             AddToCatalogSheet(skill: skill)
@@ -171,6 +175,13 @@ struct SkillDetailView: View {
     @ViewBuilder
     private var actionButton: some View {
         if skill.source == .catalog {
+            Button {
+                Task { await store.tryIt(skill, model: claudeModel) }
+            } label: {
+                Label("Try it", systemImage: "play.circle")
+            }
+            .help("Open a Claude Code session with this skill loaded, without installing it")
+
             if store.installedSkill(named: skill.name) == nil {
                 Button {
                     store.install(skill)
@@ -256,67 +267,11 @@ struct SkillDetailView: View {
         }
     }
 
-    /// Bottom panel: instruct Claude Code (headless) to manipulate this
-    /// skill's files.
-    private var chatPanel: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if chatRunner.isRunning || !chatRunner.output.isEmpty {
-                ScrollView {
-                    Text(chatRunner.output.isEmpty ? "Claude Code is working…" : chatRunner.output)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(height: 110)
-                .padding(6)
-                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
-            }
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField(
-                    "Ask Claude to change this skill's files…",
-                    text: $chatInput,
-                    axis: .vertical
-                )
-                .lineLimit(1...4)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit(runChat)
-                .disabled(chatRunner.isRunning)
-
-                Button {
-                    runChat()
-                } label: {
-                    if chatRunner.isRunning {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "paperplane.fill")
-                    }
-                }
-                .disabled(!canChat)
-                .help("Run Claude Code on this skill's directory")
-            }
-            if isDirty {
-                Text("Save your changes first — Claude edits the files on disk.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(10)
-    }
-
-    private var canChat: Bool {
-        !chatRunner.isRunning && !isDirty
-            && !chatInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private func runChat() {
-        guard canChat else { return }
-        let instruction = chatInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        chatInput = ""
-        chatRunner.run(
-            instruction: "Edit the existing skill \"\(skill.name)\". You are already "
-                + "inside its directory — its SKILL.md is at ./SKILL.md.\n\n\(instruction)",
-            cwd: skill.path
-        )
+    /// Claude touched the files under the editor — pull the catalog list and
+    /// the open file back in from disk.
+    private func reloadFromDisk() {
+        store.refresh()
+        load()
     }
 
     private func load() {

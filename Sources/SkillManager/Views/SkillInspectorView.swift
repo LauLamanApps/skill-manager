@@ -8,6 +8,7 @@ struct SkillInspectorView: View {
     let isDirty: Bool
     @Binding var selectedFile: String
     let onSelectFile: () -> Void
+    @Binding var showInspector: Bool
 
     private enum Tab {
         case info, files
@@ -17,12 +18,24 @@ struct SkillInspectorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $tab) {
-                Text("Info").tag(Tab.info)
-                Text("Files").tag(Tab.files)
+            HStack(spacing: 10) {
+                Picker("", selection: $tab) {
+                    Text("Info").tag(Tab.info)
+                    Text("Files").tag(Tab.files)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                Spacer()
+
+                Button {
+                    showInspector.toggle()
+                } label: {
+                    Label("Close", systemImage: "sidebar.trailing")
+                }
+                .labelStyle(.iconOnly)
+                .help("Hide the info panel")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
             .padding(10)
             Divider()
             switch tab {
@@ -39,6 +52,7 @@ struct SkillInspectorView: View {
                 row("Source", skill.source == .catalog ? "Catalog" : "Installed")
                 installedState
                 row("Description", skill.description.isEmpty ? "—" : skill.description)
+                health
                 row("Created", format(createdAt))
                 row("Modified", format(modifiedAt))
                 if let installedAt {
@@ -86,6 +100,33 @@ struct SkillInspectorView: View {
             Text(text)
                 .font(.callout)
                 .foregroundStyle(color)
+        }
+    }
+
+    /// Advisory SKILL.md lint (`SkillHealth`) — never blocks anything, the fix
+    /// happens in the editor or via "Edit with AI".
+    @ViewBuilder
+    private var health: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Health")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if skill.issues.isEmpty {
+                Label("No issues", systemImage: "checkmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.green)
+            } else {
+                ForEach(skill.issues, id: \.self) { issue in
+                    VStack(alignment: .leading, spacing: 1) {
+                        Label(issue.label, systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                        Text(issue.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
         }
     }
 
