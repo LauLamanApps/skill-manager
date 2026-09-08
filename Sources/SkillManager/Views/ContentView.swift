@@ -15,9 +15,16 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject var store: SkillStore
+    @EnvironmentObject var chatSessions: ChatSessionStore
+    @EnvironmentObject var updateController: UpdateController
     @State private var section: SidebarSection? = .catalog
-    @State private var selectedSkillID: Skill.ID?
+    @State private var selectedSkillIDs: Set<Skill.ID> = []
     @State private var showNewSkillSheet = false
+
+    private var isCheckingForUpdates: Bool {
+        if case .checking = updateController.state { return true }
+        return false
+    }
 
     private var currentSection: SidebarSection { section ?? .catalog }
 
@@ -25,8 +32,11 @@ struct ContentView: View {
         currentSection == .catalog ? store.catalog : store.installed
     }
 
+    /// The detail column only makes sense for exactly one skill; a multi-select
+    /// is handled by the bulk bar in the list column instead.
     private var selectedSkill: Skill? {
-        skillsForSection.first { $0.id == selectedSkillID }
+        guard selectedSkillIDs.count == 1 else { return nil }
+        return skillsForSection.first { selectedSkillIDs.contains($0.id) }
     }
 
     var body: some View {
@@ -41,7 +51,7 @@ struct ContentView: View {
             SkillListView(
                 skills: skillsForSection,
                 section: currentSection,
-                selection: $selectedSkillID
+                selection: $selectedSkillIDs
             )
             .navigationSplitViewColumnWidth(min: 260, ideal: 300)
             // Anchored to the list column, like the sidebar toggle is to the sidebar.
@@ -71,6 +81,12 @@ struct ContentView: View {
             if let skill = selectedSkill {
                 SkillDetailView(skill: skill)
                     .id(skill.id)
+            } else if selectedSkillIDs.count > 1 {
+                ContentUnavailableView(
+                    "\(selectedSkillIDs.count) Skills Selected",
+                    systemImage: "checklist",
+                    description: Text("Use the bar above the list to install, tag, or uninstall them together.")
+                )
             } else {
                 ContentUnavailableView(
                     "No Skill Selected",
@@ -80,7 +96,13 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showNewSkillSheet) {
-            AISkillSheet(mode: .create)
+            AISkillSheet(runner: chatSessions.runner(for: .newSkill), mode: .create)
+        }
+        .sheet(item: $store.syncConflict) { conflict in
+            SyncConflictSheet(conflict: conflict)
+        }
+        .sheet(isPresented: Binding(get: { isCheckingForUpdates }, set: { _ in })) {
+            UpdateCheckModal()
         }
         .alert(
             "Error",
@@ -93,7 +115,7 @@ struct ContentView: View {
         } message: {
             Text(store.lastError ?? "")
         }
-        .onChange(of: section) { _, _ in selectedSkillID = nil }
+        .onChange(of: section) { _, _ in selectedSkillIDs = [] }
         .onAppear { store.refresh() }
     }
 }

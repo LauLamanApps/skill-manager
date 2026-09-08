@@ -4,10 +4,18 @@ struct SkillListView: View {
     @EnvironmentObject var store: SkillStore
     let skills: [Skill]
     let section: SidebarSection
-    @Binding var selection: Skill.ID?
+    @Binding var selection: Set<Skill.ID>
 
     @State private var searchText = ""
     @State private var activeTag: String?
+    @State private var showBulkTagSheet = false
+    @State private var confirmBulkUninstall = false
+
+    /// The selection acts on every picked skill, including ones the current
+    /// search/tag filter hides — filtering is a view, not a deselection.
+    private var selectedSkills: [Skill] {
+        skills.filter { selection.contains($0.id) }
+    }
 
     private var allTags: [String] {
         Array(Set(skills.flatMap(\.tags)))
@@ -25,6 +33,7 @@ struct SkillListView: View {
                 || skill.description.localizedCaseInsensitiveContains(query)
                 || skill.tags.contains { $0.localizedCaseInsensitiveContains(query) }
                 || skill.folder.localizedCaseInsensitiveContains(query)
+                || skill.bodyText.localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -52,6 +61,10 @@ struct SkillListView: View {
                         tagBar
                         Divider()
                     }
+                    if selectedSkills.count > 1 {
+                        bulkBar
+                        Divider()
+                    }
                     if filteredSkills.isEmpty {
                         ContentUnavailableView.search
                     } else {
@@ -61,6 +74,69 @@ struct SkillListView: View {
             }
         }
         .navigationTitle(section.rawValue)
+        .sheet(isPresented: $showBulkTagSheet) {
+            BulkTagSheet(skills: selectedSkills, existingTags: allTags)
+        }
+        .confirmationDialog(
+            "Uninstall \(selectedSkills.count) skills?",
+            isPresented: $confirmBulkUninstall,
+            titleVisibility: .visible
+        ) {
+            Button("Uninstall", role: .destructive) {
+                store.uninstall(selectedSkills)
+                selection.removeAll()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Their folders are removed from ~/.claude/skills. This can't be undone.")
+        }
+    }
+
+    /// Appears once two or more rows are picked; every action is a batch of the
+    /// same single-skill store call, with one refresh at the end.
+    private var bulkBar: some View {
+        HStack(spacing: 8) {
+            Text("\(selectedSkills.count) selected")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            Spacer()
+            if section == .catalog {
+                Button {
+                    store.install(selectedSkills)
+                    selection.removeAll()
+                } label: {
+                    Label("Install", systemImage: "arrow.down.circle")
+                }
+                .help("Install or update all selected skills")
+            }
+            Button {
+                showBulkTagSheet = true
+            } label: {
+                Label("Tag", systemImage: "tag")
+            }
+            .help("Add a tag to all selected skills")
+            if section == .installed {
+                Button(role: .destructive) {
+                    confirmBulkUninstall = true
+                } label: {
+                    Label("Uninstall", systemImage: "trash")
+                }
+                .help("Remove all selected skills from ~/.claude/skills")
+            }
+            Button {
+                selection.removeAll()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Clear selection")
+        }
+        .labelStyle(.titleAndIcon)
+        .controlSize(.small)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.accentColor.opacity(0.10))
     }
 
     private var skillList: some View {
@@ -155,6 +231,7 @@ struct SkillListView: View {
 
 struct SkillRow: View {
     @EnvironmentObject var store: SkillStore
+    @AppStorage("claudeModel") private var claudeModel: String = ""
     let skill: Skill
     let section: SidebarSection
 
@@ -177,15 +254,46 @@ struct SkillRow: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
-                if let version = skill.version {
-                    Text("v\(version)")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    healthIcon
+                    if let version = skill.version {
+                        Text("v\(version)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 statusBadge
             }
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            if section == .catalog {
+                Button {
+                    Task { await store.tryIt(skill, model: claudeModel) }
+                } label: {
+                    Label("Try it", systemImage: "play.circle")
+                }
+                Button {
+                    store.install(skill)
+                } label: {
+                    Label(
+                        store.installedSkill(named: skill.name) == nil ? "Install" : "Update",
+                        systemImage: "arrow.down.circle"
+                    )
+                }
+            }
+        }
+    }
+
+    /// Hint only — hover for the list of what's missing, fix it in the editor.
+    @ViewBuilder
+    private var healthIcon: some View {
+        if !skill.issues.isEmpty {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .help(skill.issues.map(\.label).joined(separator: "\n"))
+        }
     }
 
     @ViewBuilder
@@ -212,5 +320,65 @@ struct SkillRow: View {
             .padding(.vertical, 2)
             .background(color.opacity(0.18), in: Capsule())
             .foregroundStyle(color)
+    }
+}
+
+
+/// Adds one tag to a whole selection at once. Existing tags of each skill are
+/// kept; a skill that already carries the tag is skipped by the store.
+struct BulkTagSheet: View {
+    @EnvironmentObject var store: SkillStore
+    @Environment(\.dismiss) private var dismiss
+    let skills: [Skill]
+    let existingTags: [String]
+
+    @State private var tag = ""
+
+    private var cleanTag: String { tag.trimmingCharacters(in: .whitespaces) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Tag \(skills.count) Skills").font(.title3.bold())
+            Text("The tag is appended to each skill's frontmatter. Skills that already have it stay unchanged.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            TextField("Tag", text: $tag)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(apply)
+            if !existingTags.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(existingTags, id: \.self) { existing in
+                            Button {
+                                tag = existing
+                            } label: {
+                                Text(existing)
+                                    .font(.caption.weight(.medium))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Color.gray.opacity(0.15), in: Capsule())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Add Tag", action: apply)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(cleanTag.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+    }
+
+    private func apply() {
+        guard !cleanTag.isEmpty else { return }
+        store.addTag(cleanTag, to: skills)
+        dismiss()
     }
 }

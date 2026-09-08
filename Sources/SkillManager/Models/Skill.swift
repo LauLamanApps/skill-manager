@@ -14,6 +14,10 @@ struct Skill: Identifiable, Hashable {
     let folder: String
     let path: URL
     let source: SkillSource
+    /// Advisory SKILL.md problems found while scanning; see `SkillHealth`.
+    let issues: [SkillIssue]
+    /// SKILL.md content after the frontmatter block, for full-text search.
+    let bodyText: String
 
     var id: String { "\(source.rawValue):\(folder.isEmpty ? name : "\(folder)/\(name)")" }
 

@@ -3,11 +3,41 @@ import Foundation
 enum GitError: LocalizedError {
     case noRepoConfigured
     case notCloned
+    /// The rebase started by `pull()` stopped on conflicting files. The repo is
+    /// left mid-rebase on purpose so the user can resolve and continue.
+    case conflict(files: [String])
 
     var errorDescription: String? {
         switch self {
         case .noRepoConfigured: return "No catalog repository URL configured. Set one in Settings."
         case .notCloned: return "Catalog is not cloned yet. Clone it from Settings or hit Sync."
+        case .conflict(let files):
+            return "Sync stopped on \(files.count) conflicting file(s): "
+                + files.joined(separator: ", ")
+        }
+    }
+}
+
+/// Which side of a conflicting file wins. During a `pull --rebase` the local
+/// commits are the ones being replayed, so "local" is `REBASE_HEAD` and
+/// "remote" is `HEAD` — not the other way round.
+enum ConflictResolution: String, CaseIterable, Identifiable {
+    case keepLocal
+    case keepRemote
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .keepLocal: return "Keep Local"
+        case .keepRemote: return "Keep Remote"
+        }
+    }
+
+    /// Revision to take the file contents from while a rebase is stopped.
+    var revision: String {
+        switch self {
+        case .keepLocal: return "REBASE_HEAD"
+        case .keepRemote: return "HEAD"
         }
     }
 }
@@ -41,9 +71,73 @@ struct GitService {
             .write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// Rebases onto the remote. A rebase that stops on conflicts throws
+    /// `GitError.conflict` (repo left mid-rebase, resolvable via
+    /// `resolveConflicts` or `abortRebase`); any other failure throws the
+    /// underlying `ShellError`.
     func pull() async throws {
         guard isCloned else { throw GitError.notCloned }
-        try await Shell.runChecked(Self.git, ["-C", catalogDir.path, "pull", "--rebase"])
+        let result = try await Shell.run(
+            Self.git, ["-C", catalogDir.path, "pull", "--rebase"]
+        )
+        guard !result.succeeded else { return }
+        let files = await conflictedFiles()
+        guard files.isEmpty else { throw GitError.conflict(files: files) }
+        throw ShellError.failed(command: "git pull --rebase", result: result)
+    }
+
+    /// Paths git reports as unmerged (stage > 0) right now.
+    func conflictedFiles() async -> [String] {
+        guard let result = try? await Shell.run(
+            Self.git,
+            ["-C", catalogDir.path, "diff", "--name-only", "--diff-filter=U", "-z"]
+        ), result.succeeded else { return [] }
+        return result.stdout.split(separator: "\0").map(String.init)
+    }
+
+    var isRebaseInProgress: Bool {
+        let git = catalogDir.appendingPathComponent(".git")
+        return ["rebase-merge", "rebase-apply"].contains {
+            FileManager.default.fileExists(atPath: git.appendingPathComponent($0).path)
+        }
+    }
+
+    /// Resolves the stopped rebase by taking each file wholesale from one side,
+    /// then continues it. A later commit in the same rebase can conflict again —
+    /// that throws `GitError.conflict` with the new file list, so the caller can
+    /// ask once more. Files without a choice default to keeping the local side.
+    func resolveConflicts(_ choices: [String: ConflictResolution]) async throws {
+        guard isCloned else { throw GitError.notCloned }
+        for file in await conflictedFiles() {
+            let side = choices[file] ?? .keepLocal
+            let checkout = try await Shell.run(
+                Self.git, ["-C", catalogDir.path, "checkout", side.revision, "--", file]
+            )
+            if checkout.succeeded {
+                try await Shell.runChecked(Self.git, ["-C", catalogDir.path, "add", "--", file])
+            } else {
+                // The chosen side deleted the file — record the deletion instead.
+                try await Shell.runChecked(
+                    Self.git, ["-C", catalogDir.path, "rm", "--force", "--", file]
+                )
+            }
+        }
+        // `-c core.editor=true` keeps the commit message git already has instead
+        // of blocking on an editor that this app has no terminal for.
+        let result = try await Shell.run(
+            Self.git,
+            ["-C", catalogDir.path, "-c", "core.editor=true", "rebase", "--continue"]
+        )
+        guard !result.succeeded else { return }
+        let remaining = await conflictedFiles()
+        guard remaining.isEmpty else { throw GitError.conflict(files: remaining) }
+        throw ShellError.failed(command: "git rebase --continue", result: result)
+    }
+
+    /// Drops the in-flight rebase and puts the worktree back where it was.
+    func abortRebase() async {
+        guard isRebaseInProgress else { return }
+        _ = try? await Shell.run(Self.git, ["-C", catalogDir.path, "rebase", "--abort"])
     }
 
     /// False for a freshly created remote with no commits — `pull` would fail
