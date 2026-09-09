@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-09-09
+
 ### Added
 
 - **Multiple skill catalogs** — a catalog is no longer a single fixed
