@@ -19,12 +19,26 @@ final class UpdateController: ObservableObject {
     @Published private(set) var state: UpdateState = .idle
     @AppStorage("lastUpdateCheck") private var lastUpdateCheckRaw: Double = 0
 
+    /// Set whenever a check resolves to `.available`, regardless of who
+    /// triggered it; cleared by the view once the user answers the prompt.
+    @Published var pendingInstallPrompt: Release?
+
+    /// One-shot outcome text for a manual check that found nothing to
+    /// install ("up to date" or an error) — the automatic 24h check stays
+    /// silent on these outcomes, so this is only ever set for `manual: true`.
+    @Published var manualCheckFeedback: String?
+
     private let checker: UpdateChecker
     private let installer: UpdateInstaller
 
     /// DMG asset of the release the last check found, kept so the download does
     /// not have to hit the API again.
     private var pendingDMGURL: URL?
+
+    /// Set by `installNow()` so the download, once it lands at
+    /// `.readyToInstall`, proceeds straight into `installUpdate()` instead of
+    /// waiting for a second, separate button press.
+    private var autoInstallAfterDownload = false
 
     /// Set once the DMG is downloaded and mounted; `installUpdate()` copies the
     /// app bundle out of this and detaches it.
@@ -79,7 +93,7 @@ final class UpdateController: ObservableObject {
         automaticCheckTask = nil
     }
 
-    func checkForUpdates() async {
+    func checkForUpdates(manual: Bool = false) async {
         // A previous run may have left a volume attached; it is stale now.
         await discardMountedUpdate()
 
@@ -89,11 +103,14 @@ final class UpdateController: ObservableObject {
         switch await checker.check() {
         case .upToDate:
             state = .upToDate
+            if manual { manualCheckFeedback = "You're on the latest version." }
         case .available(let release, let dmgURL):
             pendingDMGURL = dmgURL
             state = .available(release)
+            pendingInstallPrompt = release
         case .failed(let error):
             state = .failed(error.localizedDescription)
+            if manual { manualCheckFeedback = error.localizedDescription }
         }
         lastUpdateCheckRaw = Date().timeIntervalSince1970
     }
@@ -114,10 +131,21 @@ final class UpdateController: ObservableObject {
                 }
                 mountedUpdate = image
                 state = .readyToInstall
+                if autoInstallAfterDownload {
+                    autoInstallAfterDownload = false
+                    installUpdate()
+                }
             } catch {
                 state = .failed(error.localizedDescription)
             }
         }
+    }
+
+    /// Confirms the install prompt: downloads and, once ready, installs
+    /// without waiting for a second button press.
+    func installNow() {
+        autoInstallAfterDownload = true
+        downloadUpdate()
     }
 
     /// Replaces the running bundle with the downloaded one and restarts into it.

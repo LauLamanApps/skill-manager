@@ -127,12 +127,16 @@ struct SaveSkillSheet: View {
                         .write(to: skill.skillFile, atomically: true, encoding: .utf8)
                     newFrontmatter = frontmatter
                 }
-                if skill.source == .catalog {
+                // Commits land in the repo the skill was scanned from, not in
+                // whichever catalog happens to be first. A skill whose catalog
+                // is gone keeps the saved file — there is just no repo to
+                // commit it to.
+                if skill.source == .catalog, let git = store.git(forCatalogID: skill.catalogID) {
                     let text = summary.trimmingCharacters(in: .whitespacesAndNewlines)
                     let message = "\(skill.name) v\(version): "
                         + (text.isEmpty ? "update skill" : text)
                     if createPR {
-                        let url = try await store.git.createPullRequest(
+                        let url = try await git.createPullRequest(
                             paths: [skill.path.path],
                             branch: branchName,
                             title: message,
@@ -142,7 +146,7 @@ struct SaveSkillSheet: View {
                             NSWorkspace.shared.open(url)
                         }
                     } else {
-                        try await store.git.commit(paths: [skill.path.path], message: message)
+                        try await git.commit(paths: [skill.path.path], message: message)
                     }
                 }
                 store.refresh()

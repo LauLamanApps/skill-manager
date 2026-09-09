@@ -1,12 +1,14 @@
 import Foundation
 import SwiftUI
 
-/// Runs Claude Code headless (`claude -p`) to generate or edit skills in the catalog.
+/// Runs an agent CLI headless to generate or edit skills in the catalog.
 ///
-/// One runner owns one conversation: the first call opens a Claude Code
-/// session, every later call resumes it by session id, so a follow-up like
-/// "no, use snake_case instead" lands in a context that still knows what was
-/// just written.
+/// One runner owns one conversation: the first call opens an agent session,
+/// every later call resumes it by session id, so a follow-up like "no, use
+/// snake_case instead" lands in a context that still knows what was just
+/// written. Which CLI actually runs, and how its output is read, is the
+/// `AgentRunner`'s business — this class only sequences turns and reviews the
+/// files they touch.
 @MainActor
 final class ClaudeRunner: ObservableObject {
     /// One user instruction plus everything Claude Code emitted in response.
@@ -38,6 +40,10 @@ final class ClaudeRunner: ObservableObject {
     @Published var draft: String = ""
     @Published var askOnly = false
 
+    /// The CLI this conversation runs on, and the only thing here that knows
+    /// what a `claude` or a `codex` is.
+    let agent: any AgentRunner
+
     /// Session the CLI reported on the first turn; later turns resume it.
     private(set) var sessionID: String?
 
@@ -47,6 +53,10 @@ final class ClaudeRunner: ObservableObject {
     /// State of the working directory before the first unreviewed turn.
     private var baseline: DirectorySnapshot?
     private var ignoreMatcher = GitignoreMatcher(lines: GitignoreMatcher.defaultPatterns)
+
+    init(agent: any AgentRunner = AgentRunners.active) {
+        self.agent = agent
+    }
 
     /// Transcript of the turn currently in flight (or the last finished one).
     var output: String { turns.last?.output ?? "" }
@@ -85,17 +95,6 @@ final class ClaudeRunner: ObservableObject {
         """
     }
 
-    /// `--verbose` is what makes `--output-format stream-json` legal together
-    /// with `-p`; without it the CLI refuses to start. `plan` mode makes the
-    /// CLI refuse edits outright, so Ask mode can't accidentally change a file.
-    private static func command(resuming sessionID: String?, readOnly: Bool, model: String? = nil) -> String {
-        var parts = ["claude", "-p", "--permission-mode", readOnly ? "plan" : "acceptEdits"]
-        if let sessionID { parts += ["--resume", sessionID] }
-        if let model, !model.isEmpty { parts += ["--model", model] }
-        parts += ["--output-format", "stream-json", "--verbose"]
-        return parts.joined(separator: " ")
-    }
-
     /// Sends one instruction and appends its answer as a new turn.
     ///
     /// `context` frames what is being worked on (which skill, which folder).
@@ -116,7 +115,9 @@ final class ClaudeRunner: ObservableObject {
         model: String? = nil
     ) {
         guard !isRunning else { return }
-        let resumedSession = sessionID
+        // A CLI that cannot resume starts every turn fresh, so the framing
+        // context has to go out again rather than being assumed.
+        let resumedSession = agent.supportsResume ? sessionID : nil
         finishedSuccessfully = nil
         isRunning = true
         cancelRequested = false
@@ -136,7 +137,7 @@ final class ClaudeRunner: ObservableObject {
         } else {
             prompt = instruction
         }
-        let command = Self.command(resuming: resumedSession, readOnly: readOnly, model: model)
+        let command = agent.command(resuming: resumedSession, readOnly: readOnly, model: model)
 
         Task {
             // Taken before the CLI starts, so everything it writes shows up as
@@ -280,8 +281,8 @@ final class ClaudeRunner: ObservableObject {
     /// Decodes one stream line into the current turn, and picks up the session
     /// id the first time the CLI reports one.
     private func append(line: String) {
-        let decoded = ClaudeStreamEvent.parse(line: line)
-        if sessionID == nil, let id = decoded.sessionID, UUID(uuidString: id) != nil {
+        let decoded = agent.parse(line: line)
+        if sessionID == nil, let id = decoded.sessionID {
             sessionID = id
         }
         for fragment in decoded.events.compactMap(\.displayText) {
@@ -293,12 +294,5 @@ final class ClaudeRunner: ObservableObject {
         guard !text.isEmpty, let index = turns.indices.last else { return }
         if !turns[index].output.isEmpty { turns[index].output += "\n" }
         turns[index].output += text
-    }
-
-    /// True if a `claude` binary is reachable from a login shell.
-    static func checkAvailability() async -> String? {
-        let result = try? await Shell.runInLoginShell("command -v claude && claude --version")
-        guard let result, result.succeeded else { return nil }
-        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

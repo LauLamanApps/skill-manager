@@ -1,13 +1,16 @@
+import AppKit
 import SwiftUI
 
 struct SkillListView: View {
     @EnvironmentObject var store: SkillStore
+    @Environment(\.openWindow) private var openWindow
     let skills: [Skill]
     let section: SidebarSection
     @Binding var selection: Set<Skill.ID>
 
     @State private var searchText = ""
     @State private var activeTag: String?
+    @State private var activeCatalogID: UUID?
     @State private var showBulkTagSheet = false
     @State private var confirmBulkUninstall = false
 
@@ -22,9 +25,19 @@ struct SkillListView: View {
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
+    /// Catalogs actually represented among `skills`, in configured order — the
+    /// filter only ever offers choices that would narrow the current list.
+    private var presentCatalogs: [Catalog] {
+        let ids = Set(skills.compactMap(\.catalogID))
+        return store.catalogs.filter { ids.contains($0.id) }
+    }
+
     private var filteredSkills: [Skill] {
         skills.filter { skill in
             if let tag = activeTag, !skill.tags.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) {
+                return false
+            }
+            if let activeCatalogID, skill.catalogID != activeCatalogID {
                 return false
             }
             let query = searchText.trimmingCharacters(in: .whitespaces)
@@ -61,6 +74,10 @@ struct SkillListView: View {
                         tagBar
                         Divider()
                     }
+                    if presentCatalogs.count > 1 {
+                        catalogFilterBar
+                        Divider()
+                    }
                     if selectedSkills.count > 1 {
                         bulkBar
                         Divider()
@@ -68,12 +85,17 @@ struct SkillListView: View {
                     if filteredSkills.isEmpty {
                         ContentUnavailableView.search
                     } else {
-                        skillList
+                        skillGrid
                     }
                 }
             }
         }
         .navigationTitle(section.rawValue)
+        .onChange(of: presentCatalogs) { _, new in
+            if let id = activeCatalogID, !new.contains(where: { $0.id == id }) {
+                activeCatalogID = nil
+            }
+        }
         .sheet(isPresented: $showBulkTagSheet) {
             BulkTagSheet(skills: selectedSkills, existingTags: allTags)
         }
@@ -101,11 +123,8 @@ struct SkillListView: View {
                 .foregroundStyle(.secondary)
             Spacer()
             if section == .catalog {
-                Button {
-                    store.install(selectedSkills)
+                InstallButton(skills: selectedSkills, title: "Install") {
                     selection.removeAll()
-                } label: {
-                    Label("Install", systemImage: "arrow.down.circle")
                 }
                 .help("Install or update all selected skills")
             }
@@ -139,22 +158,60 @@ struct SkillListView: View {
         .background(Color.accentColor.opacity(0.10))
     }
 
-    private var skillList: some View {
-        List(selection: $selection) {
-            ForEach(groupedSkills, id: \.folder) { group in
-                if group.folder.isEmpty && groupedSkills.count == 1 {
-                    ForEach(group.skills) { skill in
-                        SkillRow(skill: skill, section: section).tag(skill.id)
+    /// Cards flow as wide as the window allows; the bounds keep them readable
+    /// on a narrow window without stretching into banners on a wide one.
+    private let columns = [GridItem(.adaptive(minimum: 250, maximum: 340), spacing: 12, alignment: .top)]
+
+    private var skillGrid: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 18) {
+                ForEach(groupedSkills, id: \.folder) { group in
+                    // A single unnamed folder is the whole list — no header needed.
+                    if !(group.folder.isEmpty && groupedSkills.count == 1) {
+                        Text(group.folder.isEmpty ? "General" : group.folder)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.secondary)
                     }
-                } else {
-                    Section(group.folder.isEmpty ? "General" : group.folder) {
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
                         ForEach(group.skills) { skill in
-                            SkillRow(skill: skill, section: section).tag(skill.id)
+                            SkillCard(
+                                skill: skill,
+                                section: section,
+                                isSelected: selection.contains(skill.id),
+                                onOpen: { open(skill) }
+                            )
+                            // The double-click handler is declared first so it
+                            // gets the chance to claim the second click.
+                            .onTapGesture(count: 2) { open(skill) }
+                            .onTapGesture { select(skill) }
                         }
                     }
                 }
             }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// Plain click replaces the selection, ⌘-click toggles one card — the same
+    /// semantics `List` gives for free, which a grid has to spell out.
+    private func select(_ skill: Skill) {
+        guard NSEvent.modifierFlags.contains(.command) else {
+            selection = [skill.id]
+            return
+        }
+        if selection.contains(skill.id) {
+            selection.remove(skill.id)
+        } else {
+            selection.insert(skill.id)
+        }
+    }
+
+    /// Opens the skill's editing window. Passing the id as the window value
+    /// means a skill that is already open is brought forward, not duplicated.
+    private func open(_ skill: Skill) {
+        selection = [skill.id]
+        openWindow(id: SkillWindow.id, value: skill.id)
     }
 
     /// Lives in the list column (not the window toolbar) so the open inspector
@@ -207,18 +264,59 @@ struct SkillListView: View {
         }
     }
 
+    private var catalogFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                catalogChip(id: nil, label: "All")
+                ForEach(presentCatalogs) { cat in
+                    catalogChip(id: cat.id, label: cat.name)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private func catalogChip(id: UUID?, label: String) -> some View {
+        let isActive = activeCatalogID == id
+        return Button {
+            activeCatalogID = id
+        } label: {
+            Text(label)
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    isActive ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.15),
+                    in: Capsule()
+                )
+                .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.plain)
+    }
+
     @ViewBuilder
     private var emptyState: some View {
         if section == .catalog {
-            ContentUnavailableView(
-                "Catalog Is Empty",
-                systemImage: "books.vertical",
-                description: Text(
-                    store.git.isCloned
-                        ? "No skills in the catalog yet. Create one with the + button."
-                        : "Set the catalog repository URL in Settings, then hit Sync to clone it."
+            if store.catalogs.isEmpty {
+                ContentUnavailableView(
+                    "No Catalog Configured",
+                    systemImage: "books.vertical",
+                    description: Text("Add a catalog in Settings to get started.")
                 )
-            )
+            } else if !store.hasClonedCatalog {
+                ContentUnavailableView(
+                    "Catalog Not Synced Yet",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    description: Text("Hit Sync to clone the configured catalog(s).")
+                )
+            } else {
+                ContentUnavailableView(
+                    "Catalog Is Empty",
+                    systemImage: "books.vertical",
+                    description: Text("No skills in the catalog yet. Create one with the + button.")
+                )
+            }
         } else {
             ContentUnavailableView(
                 "No Skills Installed",
@@ -229,58 +327,92 @@ struct SkillListView: View {
     }
 }
 
-struct SkillRow: View {
+struct SkillCard: View {
     @EnvironmentObject var store: SkillStore
-    @AppStorage("claudeModel") private var claudeModel: String = ""
     let skill: Skill
     let section: SidebarSection
+    let isSelected: Bool
+    let onOpen: () -> Void
 
     var body: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(skill.name)
                     .font(.headline)
-                Text(skill.description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                if !skill.tags.isEmpty {
-                    Label(skill.tags.joined(separator: " · "), systemImage: "tag")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                healthIcon
+                Spacer(minLength: 4)
+                if let version = skill.version {
+                    Text("v\(version)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
                 }
             }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 4) {
-                HStack(spacing: 4) {
-                    healthIcon
-                    if let version = skill.version {
-                        Text("v\(version)")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                }
+
+            // Two fixed lines, so cards in a row keep the same rhythm whether a
+            // description is one word or a paragraph.
+            Text(skill.description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2, reservesSpace: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if !skill.tags.isEmpty {
+                Label(skill.tags.joined(separator: " · "), systemImage: "tag")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 6) {
+                catalogBadge
                 statusBadge
+                Spacer(minLength: 0)
+                if section == .catalog {
+                    InstallButton(
+                        skills: [skill],
+                        title: store.installedSkill(named: skill.name) == nil ? "Install" : "Update"
+                    )
+                    .controlSize(.small)
+                    .labelStyle(.titleOnly)
+                }
             }
         }
-        .padding(.vertical, 4)
+        .padding(12)
+        .frame(minHeight: 132, alignment: .topLeading)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(
+                    isSelected ? Color.accentColor : Color.gray.opacity(0.25),
+                    lineWidth: isSelected ? 2 : 1
+                )
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 10))
         .contextMenu {
+            // Double-click does the same; the item is what makes that discoverable.
+            Button {
+                onOpen()
+            } label: {
+                Label("Open in Window", systemImage: "macwindow")
+            }
             if section == .catalog {
-                Button {
-                    Task { await store.tryIt(skill, model: claudeModel) }
-                } label: {
-                    Label("Try it", systemImage: "play.circle")
+                Divider()
+                if store.canTryIt {
+                    Button {
+                        Task { await store.tryIt(skill) }
+                    } label: {
+                        Label("Try it", systemImage: "play.circle")
+                    }
                 }
-                Button {
-                    store.install(skill)
-                } label: {
-                    Label(
-                        store.installedSkill(named: skill.name) == nil ? "Install" : "Update",
-                        systemImage: "arrow.down.circle"
-                    )
-                }
+                InstallButton(
+                    skills: [skill],
+                    title: store.installedSkill(named: skill.name) == nil ? "Install" : "Update"
+                )
             }
         }
     }
@@ -293,6 +425,22 @@ struct SkillRow: View {
                 .font(.caption)
                 .foregroundStyle(.orange)
                 .help(skill.issues.map(\.label).joined(separator: "\n"))
+        }
+    }
+
+    /// Which catalog this card came from — only worth showing once the merged
+    /// list actually spans more than one.
+    @ViewBuilder
+    private var catalogBadge: some View {
+        if section == .catalog, store.catalogs.count > 1,
+           let name = store.catalog(withID: skill.catalogID)?.name {
+            Text(name)
+                .font(.caption2.weight(.medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.gray.opacity(0.15), in: Capsule())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
     }
 
@@ -320,6 +468,7 @@ struct SkillRow: View {
             .padding(.vertical, 2)
             .background(color.opacity(0.18), in: Capsule())
             .foregroundStyle(color)
+            .lineLimit(1)
     }
 }
 

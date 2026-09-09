@@ -18,6 +18,8 @@ struct Release: Decodable {
     let htmlURL: URL
     let publishedAt: Date
     let assets: [ReleaseAsset]
+    /// Release notes body, as Markdown, straight from the GitHub release.
+    let body: String?
 
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
@@ -25,6 +27,7 @@ struct Release: Decodable {
         case htmlURL = "html_url"
         case publishedAt = "published_at"
         case assets
+        case body
     }
 
     var dmgAsset: ReleaseAsset? {

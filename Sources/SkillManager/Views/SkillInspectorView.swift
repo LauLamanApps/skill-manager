@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Right-hand inspector: skill metadata and a clickable file tree.
+/// Leading-edge info panel: skill metadata and a clickable file tree.
 struct SkillInspectorView: View {
     @EnvironmentObject var store: SkillStore
     let skill: Skill
@@ -8,7 +8,6 @@ struct SkillInspectorView: View {
     let isDirty: Bool
     @Binding var selectedFile: String
     let onSelectFile: () -> Void
-    @Binding var showInspector: Bool
 
     private enum Tab {
         case info, files
@@ -18,24 +17,14 @@ struct SkillInspectorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Picker("", selection: $tab) {
-                    Text("Info").tag(Tab.info)
-                    Text("Files").tag(Tab.files)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-
-                Spacer()
-
-                Button {
-                    showInspector.toggle()
-                } label: {
-                    Label("Close", systemImage: "sidebar.trailing")
-                }
-                .labelStyle(.iconOnly)
-                .help("Hide the info panel")
+            // Collapsing is the toolbar's sidebar toggle; the panel doesn't
+            // need a second control for it.
+            Picker("", selection: $tab) {
+                Text("Info").tag(Tab.info)
+                Text("Files").tag(Tab.files)
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
             .padding(10)
             Divider()
             switch tab {
@@ -49,7 +38,7 @@ struct SkillInspectorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 row("Version", skill.version.map { "v\($0)" } ?? "—")
-                row("Source", skill.source == .catalog ? "Catalog" : "Installed")
+                row("Source", sourceLabel)
                 installedState
                 row("Description", skill.description.isEmpty ? "—" : skill.description)
                 health
@@ -66,6 +55,15 @@ struct SkillInspectorView: View {
 
     // MARK: - Metadata rows
 
+    /// "Catalog" / "Installed" alone once meant a single, implicit catalog.
+    /// With several configured, the row names which one — the catalog it was
+    /// scanned from, or the catalog an installed copy was installed from.
+    private var sourceLabel: String {
+        let base = skill.source == .catalog ? "Catalog" : "Installed"
+        guard let name = store.catalog(withID: skill.catalogID)?.name else { return base }
+        return "\(base) · \(name)"
+    }
+
     private func row(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
@@ -75,6 +73,19 @@ struct SkillInspectorView: View {
                 .font(.callout)
                 .textSelection(.enabled)
         }
+    }
+
+    /// "Installed (Claude Code)" when several agents are configured, plain
+    /// "Installed" when there is only one and naming it adds nothing. With
+    /// per-agent installs, a bare "Installed" would hide that the others
+    /// don't have it.
+    private var installedSummary: String {
+        let held = store.installedTargets(for: skill.name)
+        guard store.enabledTargets.count > 1, !held.isEmpty else { return "Installed" }
+        let names = store.enabledTargets
+            .filter { held.contains($0.kind) }
+            .map(\.kind.displayName)
+        return "Installed (\(names.joined(separator: ", ")))"
     }
 
     @ViewBuilder
@@ -87,7 +98,7 @@ struct SkillInspectorView: View {
                 if store.updateAvailable(for: skill) {
                     return ("Update available (installed \(installed.version.map { "v\($0)" } ?? "unversioned"))", .orange)
                 }
-                return ("Installed", .green)
+                return (installedSummary, .green)
             }
             return store.catalogSkill(named: skill.name) == nil
                 ? ("Not in catalog", .secondary)

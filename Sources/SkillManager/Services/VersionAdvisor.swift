@@ -24,10 +24,13 @@ struct ChangeSuggestion {
 }
 
 enum VersionAdvisor {
-    /// Asks Claude Code (headless, haiku) to classify a skill edit and summarize
-    /// it in one line. Any failure — no CLI, bad exit, unparseable answer —
-    /// falls back to a patch bump with an empty summary.
-    static func suggest(fileName: String, old: String, new: String) async -> ChangeSuggestion {
+    /// Asks the agent CLI (headless, cheapest model) to classify a skill edit
+    /// and summarize it in one line. Any failure — no CLI, bad exit, unparseable
+    /// answer — falls back to a patch bump with an empty summary.
+    static func suggest(
+        fileName: String, old: String, new: String,
+        agent: any AgentRunner = AgentRunners.active
+    ) async -> ChangeSuggestion {
         let prompt = """
         Compare the old and new version of the file `\(fileName)` belonging to a \
         Claude Code skill. Reply with exactly two lines and nothing else:
@@ -46,7 +49,7 @@ enum VersionAdvisor {
         """
         let fallback = ChangeSuggestion(bump: .patch, summary: "")
         guard let result = try? await Shell.runInLoginShell(
-            "claude -p --model haiku", stdin: prompt
+            agent.oneShotCommand(), stdin: prompt
         ), result.succeeded else { return fallback }
 
         var suggestion = fallback

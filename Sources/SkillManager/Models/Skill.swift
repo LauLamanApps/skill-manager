@@ -14,12 +14,22 @@ struct Skill: Identifiable, Hashable {
     let folder: String
     let path: URL
     let source: SkillSource
+    /// For a catalog skill, the catalog it was scanned from. For an installed
+    /// skill, the catalog it was installed from (read from the `catalog:`
+    /// frontmatter marker); nil when the copy predates origin tracking.
+    let catalogID: UUID?
     /// Advisory SKILL.md problems found while scanning; see `SkillHealth`.
     let issues: [SkillIssue]
     /// SKILL.md content after the frontmatter block, for full-text search.
     let bodyText: String
 
-    var id: String { "\(source.rawValue):\(folder.isEmpty ? name : "\(folder)/\(name)")" }
+    /// Includes the catalog, so the same skill name in two catalogs stays two
+    /// distinct rows.
+    var id: String {
+        let path = folder.isEmpty ? name : "\(folder)/\(name)"
+        guard let catalogID else { return "\(source.rawValue):\(path)" }
+        return "\(source.rawValue):\(catalogID.uuidString):\(path)"
+    }
 
     var skillFile: URL { path.appendingPathComponent("SKILL.md") }
 }

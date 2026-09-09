@@ -5,6 +5,9 @@ struct SkillMeta {
     var description: String?
     var version: String?
     var tags: [String] = []
+    /// The catalog an installed copy was installed from, read from the
+    /// `catalog:` frontmatter key written by `SkillStore.performInstall`.
+    var originCatalogID: UUID?
 }
 
 enum Frontmatter {
@@ -39,6 +42,7 @@ enum Frontmatter {
             case "name": meta.name = value
             case "description": meta.description = value
             case "version": meta.version = value
+            case "catalog": meta.originCatalogID = UUID(uuidString: value)
             case "tags":
                 if value.isEmpty {
                     collectingTags = true
@@ -98,6 +102,27 @@ enum Frontmatter {
             lines[line] = "version: \(version)"
         } else {
             lines.insert("version: \(version)", at: close)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Returns the content with its frontmatter `catalog` key set to the given
+    /// catalog id, replacing an existing line or inserting one. Content without
+    /// frontmatter gets a minimal block.
+    static func settingOrigin(in content: String, catalogID: UUID) -> String {
+        var lines = content.components(separatedBy: "\n")
+        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---",
+              let close = lines.dropFirst().firstIndex(where: {
+                  $0.trimmingCharacters(in: .whitespaces) == "---"
+              }) else {
+            return "---\ncatalog: \(catalogID.uuidString)\n---\n\n" + content
+        }
+        if let line = lines[1..<close].firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("catalog:")
+        }) {
+            lines[line] = "catalog: \(catalogID.uuidString)"
+        } else {
+            lines.insert("catalog: \(catalogID.uuidString)", at: close)
         }
         return lines.joined(separator: "\n")
     }

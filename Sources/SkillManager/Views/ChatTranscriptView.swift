@@ -35,7 +35,7 @@ struct ChatTranscriptView: View {
                 .textSelection(.enabled)
             if turn.output.isEmpty {
                 if isLast, isRunning {
-                    Text("Claude Code is working…")
+                    Text("The AI is working…")
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                 }

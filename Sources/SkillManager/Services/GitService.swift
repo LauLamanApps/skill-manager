@@ -9,7 +9,7 @@ enum GitError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .noRepoConfigured: return "No catalog repository URL configured. Set one in Settings."
+        case .noRepoConfigured: return "No catalogs configured. Add one in Settings."
         case .notCloned: return "Catalog is not cloned yet. Clone it from Settings or hit Sync."
         case .conflict(let files):
             return "Sync stopped on \(files.count) conflicting file(s): "

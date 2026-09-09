@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 # Overridable by CI: release workflow passes the git tag as APP_VERSION.
 APP_VERSION="${APP_VERSION:-0.1.0}"
-APP_BUILD="${APP_BUILD:-1}"
+APP_BUILD="${APP_BUILD:-$(git rev-parse --short HEAD)}"
 
 swift build -c release
 
@@ -16,6 +16,15 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp .build/release/SkillManager "$APP/Contents/MacOS/SkillManager"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+
+# The app shows its own release notes (Settings › Release Notes). The bundled
+# copy is stamped with the version being built, because at build time the
+# shipping notes still sit under "Unreleased" — the repo-side rewrite only runs
+# after the release workflow has uploaded the DMG.
+python3 scripts/update-release-notes.py "$APP_VERSION" \
+    --input RELEASENOTES.md \
+    --output "$APP/Contents/Resources/RELEASENOTES.md" \
+    --for-bundle
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

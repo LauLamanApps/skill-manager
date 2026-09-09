@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Post-run review of what Claude Code wrote to disk: one expandable unified
+/// Post-run review of what the agent wrote to disk: one expandable unified
 /// diff per touched file, with Keep and Revert.
 ///
 /// The edits are already applied when this appears — the CLI runs with

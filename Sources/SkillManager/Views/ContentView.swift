@@ -32,13 +32,6 @@ struct ContentView: View {
         currentSection == .catalog ? store.catalog : store.installed
     }
 
-    /// The detail column only makes sense for exactly one skill; a multi-select
-    /// is handled by the bulk bar in the list column instead.
-    private var selectedSkill: Skill? {
-        guard selectedSkillIDs.count == 1 else { return nil }
-        return skillsForSection.first { selectedSkillIDs.contains($0.id) }
-    }
-
     var body: some View {
         NavigationSplitView {
             List(SidebarSection.allCases, selection: $section) { item in
@@ -47,14 +40,13 @@ struct ContentView: View {
                     .tag(item)
             }
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
-        } content: {
+        } detail: {
             SkillListView(
                 skills: skillsForSection,
                 section: currentSection,
                 selection: $selectedSkillIDs
             )
-            .navigationSplitViewColumnWidth(min: 260, ideal: 300)
-            // Anchored to the list column, like the sidebar toggle is to the sidebar.
+            // Anchored to the grid column, like the sidebar toggle is to the sidebar.
             .toolbar {
                 ToolbarItemGroup {
                     Button {
@@ -62,7 +54,7 @@ struct ContentView: View {
                     } label: {
                         Label("New Skill with AI", systemImage: "plus")
                     }
-                    .help("Generate a new skill in the catalog using Claude Code")
+                    .help("Generate a new skill in the catalog using AI")
 
                     Button {
                         Task { await store.sync() }
@@ -77,23 +69,6 @@ struct ContentView: View {
                     .help("Pull and push the catalog GitHub repository")
                 }
             }
-        } detail: {
-            if let skill = selectedSkill {
-                SkillDetailView(skill: skill)
-                    .id(skill.id)
-            } else if selectedSkillIDs.count > 1 {
-                ContentUnavailableView(
-                    "\(selectedSkillIDs.count) Skills Selected",
-                    systemImage: "checklist",
-                    description: Text("Use the bar above the list to install, tag, or uninstall them together.")
-                )
-            } else {
-                ContentUnavailableView(
-                    "No Skill Selected",
-                    systemImage: "sparkles",
-                    description: Text("Pick a skill, or create one with AI using the + button.")
-                )
-            }
         }
         .sheet(isPresented: $showNewSkillSheet) {
             AISkillSheet(runner: chatSessions.runner(for: .newSkill), mode: .create)
@@ -103,6 +78,34 @@ struct ContentView: View {
         }
         .sheet(isPresented: Binding(get: { isCheckingForUpdates }, set: { _ in })) {
             UpdateCheckModal()
+        }
+        .sheet(isPresented: Binding(
+            get: { updateController.pendingInstallPrompt != nil },
+            set: { if !$0 { updateController.pendingInstallPrompt = nil } }
+        )) {
+            if let release = updateController.pendingInstallPrompt {
+                UpdateAvailableSheet(
+                    release: release,
+                    onInstall: {
+                        updateController.installNow()
+                        updateController.pendingInstallPrompt = nil
+                    },
+                    onLater: {
+                        updateController.pendingInstallPrompt = nil
+                    }
+                )
+            }
+        }
+        .alert(
+            "Check for Updates",
+            isPresented: Binding(
+                get: { updateController.manualCheckFeedback != nil },
+                set: { if !$0 { updateController.manualCheckFeedback = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(updateController.manualCheckFeedback ?? "")
         }
         .alert(
             "Error",

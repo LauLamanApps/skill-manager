@@ -13,10 +13,11 @@ struct SyncConflictSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Sync Conflict").font(.title3.bold())
+            Text("Sync Conflict — \(conflict.catalogName)").font(.title3.bold())
             Text(
-                "\(conflict.files.count) file(s) changed both here and on the remote. "
-                    + "Pick which version wins for each — the other one is discarded."
+                "\(conflict.files.count) file(s) in “\(conflict.catalogName)” changed both here "
+                    + "and on the remote. Pick which version wins for each — the other one is "
+                    + "discarded."
             )
             .font(.callout)
             .foregroundStyle(.secondary)

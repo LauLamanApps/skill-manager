@@ -12,7 +12,8 @@ enum AISkillMode {
     }
 }
 
-/// Sheet that drives Claude Code headless to create or edit a skill in the catalog.
+/// Sheet that drives the configured AI CLI headless to create or edit a skill
+/// in the catalog.
 ///
 /// The conversation lives in `ChatSessionStore`, not in this view: closing the
 /// sheet — or navigating to another skill, which closes it — must not throw the
@@ -21,12 +22,22 @@ struct AISkillSheet: View {
     @EnvironmentObject var store: SkillStore
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var runner: ClaudeRunner
-    @AppStorage("claudeModel") private var claudeModel: String = ""
 
     let mode: AISkillMode
 
     @State private var skillName = ""
     @State private var folder = ""
+    @State private var catalogID: UUID?
+
+    /// The catalog the session writes into. The create case picks it from the
+    /// dropdown below; the edit case inherits it from the skill being edited so
+    /// The agent always runs against the repo the file actually lives in.
+    private var targetCatalog: Catalog? {
+        switch mode {
+        case .create: return store.catalog(withID: catalogID) ?? store.primaryCatalog
+        case .edit(let skill): return store.catalog(withID: skill.catalogID) ?? store.primaryCatalog
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -40,7 +51,7 @@ struct AISkillSheet: View {
                 .pickerStyle(.segmented)
                 .frame(width: 140)
                 .disabled(runner.isRunning)
-                .help("Ask runs read-only — Claude Code can't change any file.")
+                .help("Ask runs read-only — the AI can't change any file.")
             }
 
             if case .create = mode {
@@ -49,6 +60,14 @@ struct AISkillSheet: View {
                     text: $skillName
                 )
                 .textFieldStyle(.roundedBorder)
+                if store.catalogs.count > 1 {
+                    Picker("Catalog:", selection: $catalogID) {
+                        ForEach(store.catalogs) { catalog in
+                            Text(catalog.name).tag(catalog.id as UUID?)
+                        }
+                    }
+                    .disabled(runner.isRunning || runner.hasTranscript)
+                }
                 TextField("Catalog folder (optional, e.g. frontend or lang/php)", text: $folder)
                     .textFieldStyle(.roundedBorder)
             }
@@ -92,7 +111,7 @@ struct AISkillSheet: View {
             HStack {
                 if runner.isRunning {
                     ProgressView().controlSize(.small)
-                    Text("Running Claude Code…").foregroundStyle(.secondary)
+                    Text("Running…").foregroundStyle(.secondary)
                 } else if runner.finishedSuccessfully == true {
                     Label("Done", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
@@ -105,7 +124,7 @@ struct AISkillSheet: View {
                     Button("Stop") { runner.cancel() }
                 } else if runner.hasTranscript {
                     Button("New Conversation") { runner.reset() }
-                        .help("Forget this conversation and start a fresh Claude Code session")
+                        .help("Forget this conversation and start a fresh session")
                 }
                 Button(runner.finishedSuccessfully == true ? "Close" : "Cancel") {
                     dismiss()
@@ -114,20 +133,22 @@ struct AISkillSheet: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canRun)
             }
+            AgentCreditLine(agent: runner.agent)
         }
         .padding(20)
         .frame(width: 560)
         .onChange(of: runner.finishedSuccessfully) { _, success in
             if success == true, !runner.lastRunWasReadOnly { store.refresh() }
         }
+        .onAppear { catalogID = store.primaryCatalog?.id }
     }
 
     private var instructionLabel: String {
         if runner.hasTranscript {
-            return "Follow up — Claude Code still remembers the previous turns:"
+            return "Follow up — the AI still remembers the previous turns:"
         }
         switch mode {
-        case .create: return "Describe what the skill should teach Claude to do:"
+        case .create: return "Describe what the skill should teach the AI to do:"
         case .edit: return "Describe the change (version will be bumped automatically):"
         }
     }
@@ -137,7 +158,7 @@ struct AISkillSheet: View {
     }
 
     private func run() {
-        guard store.git.isCloned else {
+        guard let catalog = targetCatalog, store.git(for: catalog).isCloned else {
             store.lastError = GitError.notCloned.localizedDescription
             return
         }
@@ -147,11 +168,11 @@ struct AISkillSheet: View {
         runner.draft = ""
         runner.run(
             instruction: text,
-            cwd: SkillStore.catalogDir,
+            cwd: CatalogStore.directory(for: catalog),
             context: context,
-            ignoring: store.ignoreMatcher,
+            ignoring: store.ignoreMatcher(for: catalog.id),
             readOnly: runner.askOnly,
-            model: claudeModel.isEmpty ? nil : claudeModel
+            model: store.agentCLI.modelArgument
         )
     }
 

@@ -54,3 +54,20 @@ jobs:
         with:
           name: SkillManager-${{ steps.version.outputs.version }}
           path: SkillManager-${{ steps.version.outputs.version }}.dmg
+
+      - name: Update release notes
+        if: github.event_name == 'release'
+        run: |
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          python3 scripts/update-release-notes.py "${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add RELEASENOTES.md
+          if git diff --cached --quiet; then
+            echo "RELEASENOTES.md already up to date, nothing to commit"
+          else
+            git commit -m "docs: release notes for v${{ steps.version.outputs.version }}"
+            git push origin main
+          fi
